@@ -5,20 +5,29 @@ package instrument
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/dave/dst"
 
 	"github.com/open-telemetry/opentelemetry-go-compile-instrumentation/tool/internal/ast"
+	"github.com/open-telemetry/opentelemetry-go-compile-instrumentation/tool/internal/instrument/importcfg"
 	"github.com/open-telemetry/opentelemetry-go-compile-instrumentation/tool/util"
 )
 
 type InstrumentPhase struct {
 	logger *slog.Logger
+	// The context for this phase
+	ctx context.Context
 	// The working directory during compilation
 	workDir string
+	// The importcfg configuration
+	importConfig importcfg.ImportConfig
+	// The path to the importcfg file
+	importConfigPath string
 	// The target file to be instrumented
 	target *dst.File
 	// The parser for the target file
@@ -74,10 +83,25 @@ func interceptCompile(ctx context.Context, args []string) ([]string, error) {
 	// Read compilation output directory
 	target := util.FindFlagValue(args, "-o")
 	util.Assert(target != "", "missing -o flag value")
+	
+	// Extract -importcfg flag
+	importCfgPath := util.FindFlagValue(args, "-importcfg")
+	
 	ip := &InstrumentPhase{
-		logger:      util.LoggerFromContext(ctx),
-		workDir:     filepath.Dir(target),
-		compileArgs: args,
+		logger:           util.LoggerFromContext(ctx),
+		ctx:              ctx,
+		workDir:          filepath.Dir(target),
+		compileArgs:      args,
+		importConfigPath: importCfgPath,
+	}
+
+	// Parse existing importcfg if present
+	if importCfgPath != "" {
+		imports, err := importcfg.ParseFile(importCfgPath)
+		if err != nil {
+			return nil, fmt.Errorf("parsing importcfg: %w", err)
+		}
+		ip.importConfig = imports
 	}
 
 	// Load matched hook rules from setup phase
@@ -103,6 +127,59 @@ func interceptCompile(ctx context.Context, args []string) ([]string, error) {
 	}
 
 	return ip.compileArgs, nil
+}
+
+// updateImportConfig updates the importcfg file with new imports that were added during instrumentation.
+func (ip *InstrumentPhase) updateImportConfig(newImports map[string]string) error {
+	if ip.importConfigPath == "" {
+		// No importcfg file, skip (shouldn't happen in normal builds)
+		return nil
+	}
+
+	var updated bool
+	for _, importPath := range newImports {
+		if importPath == "unsafe" {
+			// unsafe is built-in, no archive file needed
+			continue
+		}
+
+		if _, exists := ip.importConfig.PackageFile[importPath]; exists {
+			// Already have this import
+			continue
+		}
+
+		// Resolve package archive location
+		archives, err := importcfg.ResolvePackageFiles(ip.ctx, importPath)
+		if err != nil {
+			return fmt.Errorf("resolving %q: %w", importPath, err)
+		}
+
+		for pkg, archive := range archives {
+			if _, exists := ip.importConfig.PackageFile[pkg]; !exists {
+				ip.Debug("Adding import to importcfg", "package", pkg, "archive", archive)
+				ip.importConfig.PackageFile[pkg] = archive
+				updated = true
+			}
+		}
+	}
+
+	if !updated {
+		return nil
+	}
+
+	// Backup original
+	backupPath := ip.importConfigPath + ".original"
+	if err := os.Rename(ip.importConfigPath, backupPath); err != nil {
+		return fmt.Errorf("backing up importcfg: %w", err)
+	}
+
+	// Write updated importcfg
+	if err := ip.importConfig.WriteFile(ip.importConfigPath); err != nil {
+		return fmt.Errorf("writing updated importcfg: %w", err)
+	}
+
+	ip.Info("Updated importcfg", "path", ip.importConfigPath)
+	return nil
 }
 
 // Toolexec is the entry point of the toolexec command. It intercepts all the
