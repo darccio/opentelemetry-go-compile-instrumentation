@@ -83,10 +83,10 @@ func interceptCompile(ctx context.Context, args []string) ([]string, error) {
 	// Read compilation output directory
 	target := util.FindFlagValue(args, "-o")
 	util.Assert(target != "", "missing -o flag value")
-	
+
 	// Extract -importcfg flag
 	importCfgPath := util.FindFlagValue(args, "-importcfg")
-	
+
 	ip := &InstrumentPhase{
 		logger:           util.LoggerFromContext(ctx),
 		ctx:              ctx,

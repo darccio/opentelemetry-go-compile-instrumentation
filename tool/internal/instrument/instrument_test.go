@@ -194,10 +194,10 @@ func createImportCfg(path string) {
 		}
 
 		var info struct {
-			ImportPath string
-			Export     string
+			ImportPath string `json:"ImportPath"`
+			Export     string `json:"Export"`
 		}
-		if err := json.Unmarshal(output, &info); err == nil && info.Export != "" {
+		if err2 := json.Unmarshal(output, &info); err2 == nil && info.Export != "" {
 			cfg.PackageFile[info.ImportPath] = info.Export
 		}
 	}
